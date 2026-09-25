@@ -43,6 +43,7 @@ ENV HOME=/home/ubuntu
 ENV STEAMCMDDIR=/home/ubuntu/steamcmd
 ENV SERVERDIR=/home/ubuntu/Steam
 ENV SERVER_PORT=7777
+ENV DEFAULT_WORLD_NAME="MyWorld"
 
 # Auto-update settings
 ENV ENABLE_AUTO_UPDATE=true
