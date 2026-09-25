@@ -1,7 +1,10 @@
 services:
   dragonwilds:
-    image: andyaltsys/dragonwilds-dedicated-server:latest
+    image: chloesapage/dragonwilds-server:latest
     container_name: dragonwilds
+    environment:
+      - DEFAULT_WORLD_NAME=MyWorld
+      - OWNER_ID=your_owner_id
     ports:
       - "${SERVER_PORT}:${SERVER_PORT}/udp"
     env_file:
