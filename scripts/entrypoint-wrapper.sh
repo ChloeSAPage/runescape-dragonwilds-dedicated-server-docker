@@ -402,8 +402,9 @@ monitor_players() {
         if [ "$NEW_LINES" -gt 0 ]; then
             local line player
             while IFS= read -r line; do
-                if [[ "$line" == *"LogNet: Join succeeded:"* ]]; then
-                    player=$(echo "$line" | grep -oE 'LogNet: Join succeeded: ([^[:space:]]+)' | sed 's/.*LogNet: Join succeeded: //')
+            # Use the DominionPlayerController log, this way we get the character name not the accounts name used for EOS (Steam / Jagex account)
+                if [[ "$line" == *"LogDominionPlayerControllerBase: PlayerChar entered world"* ]]; then
+                    player=$(echo "$line" | grep -oE 'Character Name\[[^]]+\]' | sed 's/.*Character Name\[\([^]]*\)\].*/\1/')
                     if [ -n "$player" ]; then
                         grep -qxF "$player" "$PLAYERS_FILE" 2>/dev/null || echo "$player" >> "$PLAYERS_FILE"
                         local count
