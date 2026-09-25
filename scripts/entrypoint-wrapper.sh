@@ -156,6 +156,7 @@ start_server() {
     cd "$SERVERDIR/RSDragonwilds/Binaries/Linux"
     ./RSDragonwildsServer-Linux-Shipping RSDragonwilds -log -Port="${SERVER_PORT}" &
     SERVER_PID=$!
+    send_discord "🚀 Dragonwilds server started"
 }
 
 # --- STOP SERVER ---
@@ -164,6 +165,7 @@ stop_server() {
         log "=== Stopping server ==="
         kill "$SERVER_PID"
         wait "$SERVER_PID" || true
+        send_discord "🛑 Dragonwilds server stopped"
     fi
 }
 
@@ -404,7 +406,7 @@ monitor_players() {
             while IFS= read -r line; do
             # Use the DominionPlayerController log, this way we get the character name not the accounts name used for EOS (Steam / Jagex account)
                 if [[ "$line" == *"LogDominionPlayerControllerBase: PlayerChar entered world"* ]]; then
-                    player=$(echo "$line" | grep -oE 'Character Name\[[^]]+\]' | sed 's/.*Character Name\[\([^]]*\)\].*/\1/')
+                    player=$(echo "$line" | grep -oE 'Character Name\[[^]]+\]' | sed 's/Character Name\[//;s/\]//')
                     if [ -n "$player" ]; then
                         grep -qxF "$player" "$PLAYERS_FILE" 2>/dev/null || echo "$player" >> "$PLAYERS_FILE"
                         local count
