@@ -432,7 +432,7 @@ monitor_players() {
                     fi
                 fi
 
-                if [[ "$line" == *"LogDominionPlayerController: ClientRequestDisconnect"* ]]; then
+                if [[ "$line" == *"ClientRequestDisconnect"* ]]; then
                     player=$(echo "$line" | grep -oE 'Character Name\[[^]]+\]' | sed 's/Character Name\[//;s/\]//')
                     if [ -n "$player" ]; then
                         sed -i "/^${player}$/d" "$PLAYERS_FILE"
