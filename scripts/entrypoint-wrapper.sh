@@ -31,6 +31,7 @@ LOGFILE="$SERVERDIR/RSDragonwilds/Saved/Logs/entrypoint.log"
 LAST_ACTIVITY_FILE="$SERVERDIR/.last_activity"
 PLAYER_COUNT_FILE="$SERVERDIR/.player_count"
 SERVER_RESTART_FILE="$SERVERDIR/.server_restart"
+SERVER_PID_FILE="$SERVERDIR/.server_pid"
 LAST_BACKUP_DATE_FILE="$SERVERDIR/.last_backup_date"
 LAST_APPLIED_BUILD_FILE="$SERVERDIR/.last_applied_build"
 UPDATE_IN_PROGRESS_FILE="$SERVERDIR/.update_in_progress"
@@ -62,7 +63,9 @@ mkdir -p "$BACKUPDIR" "$SERVERDIR/steamapps" "$(dirname "$LOGFILE")"
 [ -f "$LOGFILE" ] && rm -f "$LOGFILE"
 
 log() {
-    echo "$1" | tee -a "$LOGFILE"
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] $1" | tee -a "$LOGFILE"
 }
 
 # --- FUNCTION TO SEND DISCORD NOTIFICATION ---
@@ -156,17 +159,28 @@ start_server() {
     cd "$SERVERDIR/RSDragonwilds/Binaries/Linux"
     ./RSDragonwildsServer-Linux-Shipping RSDragonwilds -log -Port="${SERVER_PORT}" &
     SERVER_PID=$!
+    echo "$SERVER_PID" > "$SERVER_PID_FILE"
+    log "SERVER PID: $SERVER_PID"
     send_discord "🚀 Dragonwilds server started"
+    # Check for update on start
+    run_update
 }
 
 # --- STOP SERVER ---
 stop_server() {
-    if ps -p "$SERVER_PID" > /dev/null 2>&1; then
+    local pid
+    log "=== Inside stop_server ==="
+    log "SERVER PID BEFORE: $pid"
+    pid=$(cat "$SERVER_PID_FILE" 2>/dev/null || echo "${SERVER_PID:-}")
+    log "SERVER PID AFTER: $pid"
+    if [ -n "$pid" ] && ps -p "$pid" > /dev/null 2>&1; then
         log "=== Stopping server ==="
-        kill "$SERVER_PID"
-        wait "$SERVER_PID" || true
         send_discord "🛑 Dragonwilds server stopped"
+        kill "$pid"
+        wait "$pid" || true
     fi
+    SERVER_PID=""
+    rm -f "$SERVER_PID_FILE"
 }
 
 # --- CLEAN OLD BACKUPS ---
@@ -523,7 +537,16 @@ fi
 # restart the server — rather than letting the container exit and getting
 # SIGKILL'd mid-steamcmd by the kernel (PID 1 death kills the whole namespace).
 while true; do
-    wait "$SERVER_PID" || true
+    current_pid=$(cat "$SERVER_PID_FILE" 2>/dev/null || echo "${SERVER_PID:-}")
+    if [ -n "$current_pid" ]; then
+        if ps -p "$current_pid" > /dev/null 2>&1; then
+            wait "$current_pid" || true
+        else
+            log "Stale PID file entry: $current_pid — clearing it"
+            rm -f "$SERVER_PID_FILE"
+            SERVER_PID=""
+        fi
+    fi
 
     if [ -f "$UPDATE_IN_PROGRESS_FILE" ] || [ -f "$BACKUP_IN_PROGRESS_FILE" ]; then
         log "Server stopped for scheduled maintenance — waiting for completion..."
