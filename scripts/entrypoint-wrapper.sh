@@ -566,6 +566,7 @@ while true; do
         # monitor_players inode watch handles the new log automatically
     else
         log "Server exited unexpectedly — container stopping"
+        send_discord "🛑 Dragonwilds server stopped unexpectedly"
         break
     fi
 done
