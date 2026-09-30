@@ -279,9 +279,6 @@ run_daily_backup() {
     cleanup_backups
 
     send_discord "✅ Daily backup completed — restarting server."
-
-    # Release the main loop to restart the server
-    rm -f "$BACKUP_IN_PROGRESS_FILE"
 }
 
 # --- RUN UPDATE ---
@@ -359,8 +356,8 @@ run_update() {
 
     send_discord "✅ Dragonwilds server updated to build $REMOTE_BUILD — restarting server."
 
-    # Release the main loop to restart the server
-    rm -f "$UPDATE_IN_PROGRESS_FILE"
+    # The parent watchdog loop owns lifecycle cleanup. Keep the maintenance flag
+    # set until it has observed the intentional stop and restarted the server.
 }
 
 # --- MONITOR PLAYERS ---
@@ -563,7 +560,8 @@ while true; do
         log "Maintenance complete — restarting server"
         touch "$SERVER_RESTART_FILE"
         start_server
-        # monitor_players inode watch handles the new log automatically
+        # Remove files after maintenance is complete
+        rm -f "$UPDATE_IN_PROGRESS_FILE" "$BACKUP_IN_PROGRESS_FILE"
     else
         log "Server exited unexpectedly — container stopping"
         send_discord "🛑 Dragonwilds server stopped unexpectedly"
