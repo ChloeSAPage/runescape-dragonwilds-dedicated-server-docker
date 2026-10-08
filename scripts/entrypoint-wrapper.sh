@@ -164,15 +164,12 @@ start_server() {
     echo "$SERVER_PID" > "$SERVER_PID_FILE"
     log "SERVER PID: $SERVER_PID"
     send_discord "🚀 Dragonwilds server started"
-    # Check for update on start
-    run_update
 }
 
 # --- STOP SERVER ---
 stop_server() {
     local pid
     log "=== Inside stop_server ==="
-    log "SERVER PID BEFORE: $pid"
     pid=$(cat "$SERVER_PID_FILE" 2>/dev/null || echo "${SERVER_PID:-}")
     log "SERVER PID AFTER: $pid"
     if [ -n "$pid" ] && ps -p "$pid" > /dev/null 2>&1; then
@@ -182,7 +179,7 @@ stop_server() {
         for _ in $(seq 1 60); do
             ps -p "$pid" > /dev/null 2>&1 || break
             sleep 1
-done
+        done
     fi
     SERVER_PID=""
     rm -f "$SERVER_PID_FILE"
@@ -300,8 +297,8 @@ run_update() {
     LOCAL_BUILD="${LOCAL_BUILD:-unknown}"
     log "Local build: $LOCAL_BUILD"
 
-    REMOTE_BUILD=$(/home/ubuntu/steamcmd/steamcmd.sh +login anonymous +app_info_print $APPID +quit \
-        | grep '"buildid"' | head -n1 | sed 's/.*"\([0-9]*\)".*/\1/')
+    REMOTE_BUILD=$(/home/ubuntu/steamcmd/steamcmd.sh +login anonymous +app_info_update 1 +app_info_print $APPID +quit \
+    | grep '"buildid"' | head -n1 | sed 's/.*"\([0-9]*\)".*/\1/')
     log "Remote build: $REMOTE_BUILD"
 
     if [ -z "$REMOTE_BUILD" ]; then
@@ -317,7 +314,7 @@ run_update() {
     fi
 
     if [ "$REMOTE_BUILD" = "$LAST_APPLIED_BUILD" ] && [ "$LOCAL_BUILD" = "$LAST_APPLIED_BUILD" ]; then
-        log "Update to build $REMOTE_BUILD was already applied — skipping"
+        log "Update to build $REMOTE_BUILD was already applied (manifest/local build shows $LOCAL_BUILD) — skipping"
         return
     fi
 
@@ -345,14 +342,22 @@ run_update() {
         sleep 5
     done
 
+    NEW_LOCAL=$(grep '"buildid"' "$SERVERDIR/steamapps/appmanifest_$APPID.acf" 2>/dev/null | head -n1 | sed 's/.*"\([0-9]*\)".*/\1/')
+    log "Build after update: $NEW_LOCAL (expected $REMOTE_BUILD)"
+    if [ "$UPDATE_SUCCEEDED" = "true" ] && [ "$NEW_LOCAL" != "$REMOTE_BUILD" ]; then
+        log "WARNING: SteamCMD reported success but manifest build doesn't match remote"
+    fi
+
     log "=== Restoring config ==="
     [ -f "$BACKUPDIR/DedicatedServer.ini" ] && cp "$BACKUPDIR/DedicatedServer.ini" "$CONFIGFILE"
 
-    if [ "$UPDATE_SUCCEEDED" = "true" ]; then
+    if [ "$UPDATE_SUCCEEDED" = "true" ] && [ "$NEW_LOCAL" = "$REMOTE_BUILD" ]; then
         echo "$REMOTE_BUILD" > "$LAST_APPLIED_BUILD_FILE"
         log "Recorded applied build: $REMOTE_BUILD"
+    elif [ "$UPDATE_SUCCEEDED" = "true" ]; then
+        log "WARNING: SteamCMD reported success but manifest shows $NEW_LOCAL, not $REMOTE_BUILD — will retry at next check"
     else
-        log "WARNING: SteamCMD failed after 5 attempts — update may be incomplete"
+        log "WARNING: SteamCMD failed after 5 attempts — update may be incomplete, will retry at next check"
     fi
 
     if [ "$BACKUP_AFTER_UPDATE" = "true" ]; then
@@ -368,6 +373,31 @@ run_update() {
     # Signal completion to the parent loop
     touch "$UPDATE_COMPLETED_FILE"
     rm -f "$UPDATE_IN_PROGRESS_FILE"
+}
+
+# --- RUN UPDATE ON BOOT ---
+run_update_on_boot() {
+    log "=== Boot-time update check ==="
+    LOCAL_BUILD=$(grep '"buildid"' "$SERVERDIR/steamapps/appmanifest_$APPID.acf" 2>/dev/null | head -n1 | sed 's/.*"\([0-9]*\)".*/\1/')
+    LOCAL_BUILD="${LOCAL_BUILD:-unknown}"
+    REMOTE_BUILD=$(/home/ubuntu/steamcmd/steamcmd.sh +login anonymous +app_info_update 1 +app_info_print $APPID +quit \
+        | grep '"buildid"' | head -n1 | sed 's/.*"\([0-9]*\)".*/\1/')
+    log "Boot check: local=$LOCAL_BUILD remote=$REMOTE_BUILD"
+
+    if [ -n "$REMOTE_BUILD" ] && [ "$LOCAL_BUILD" != "$REMOTE_BUILD" ]; then
+        log "Updating before first start"
+        [ -f "$CONFIGFILE" ] && cp "$CONFIGFILE" "$BACKUPDIR/DedicatedServer.ini"
+        for i in {1..5}; do
+            /home/ubuntu/steamcmd/steamcmd.sh \
+                +force_install_dir "$SERVERDIR" \
+                +login anonymous \
+                +app_update $APPID validate \
+                +quit && break
+            log "SteamCMD failed, retrying in 5 seconds..."
+            sleep 5
+        done
+        [ -f "$BACKUPDIR/DedicatedServer.ini" ] && cp "$BACKUPDIR/DedicatedServer.ini" "$CONFIGFILE"
+    fi
 }
 
 # --- MONITOR PLAYERS ---
@@ -476,6 +506,7 @@ if [ ! -f "$BINARY" ]; then
 fi
 
 prepare_dedicated_server_ini
+run_update_on_boot
 start_server
 monitor_players
 
@@ -576,7 +607,7 @@ while true; do
         rm -f "$UPDATE_IN_PROGRESS_FILE" "$BACKUP_IN_PROGRESS_FILE" "$UPDATE_COMPLETED_FILE" "$BACKUP_COMPLETED_FILE"
     else
         log "Server exited unexpectedly — container stopping"
-        send_discord "🛑 Dragonwilds server stopped unexpectedly"
+        send_discord "💥 Dragonwilds server stopped unexpectedly"
         break
     fi
 done
