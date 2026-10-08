@@ -36,6 +36,8 @@ LAST_BACKUP_DATE_FILE="$SERVERDIR/.last_backup_date"
 LAST_APPLIED_BUILD_FILE="$SERVERDIR/.last_applied_build"
 UPDATE_IN_PROGRESS_FILE="$SERVERDIR/.update_in_progress"
 BACKUP_IN_PROGRESS_FILE="$SERVERDIR/.backup_in_progress"
+UPDATE_COMPLETED_FILE="$SERVERDIR/.update_completed"
+BACKUP_COMPLETED_FILE="$SERVERDIR/.backup_completed"
 SERVER_PORT="${SERVER_PORT:-7777}"
 ENABLE_AUTO_UPDATE="${ENABLE_AUTO_UPDATE:-true}"
 UPDATE_TIME="${UPDATE_TIME:-3600}"              # How often (seconds) to check for updates (e.g. 3600 = every hour)
@@ -177,7 +179,10 @@ stop_server() {
         log "=== Stopping server ==="
         send_discord "🛑 Dragonwilds server stopped"
         kill "$pid"
-        wait "$pid" || true
+        for _ in $(seq 1 60); do
+            ps -p "$pid" > /dev/null 2>&1 || break
+            sleep 1
+done
     fi
     SERVER_PID=""
     rm -f "$SERVER_PID_FILE"
@@ -279,6 +284,10 @@ run_daily_backup() {
     cleanup_backups
 
     send_discord "✅ Daily backup completed — restarting server."
+
+    # Signal completion to the parent loop
+    touch "$BACKUP_COMPLETED_FILE"
+    rm -f "$BACKUP_IN_PROGRESS_FILE"
 }
 
 # --- RUN UPDATE ---
@@ -356,8 +365,9 @@ run_update() {
 
     send_discord "✅ Dragonwilds server updated to build $REMOTE_BUILD — restarting server."
 
-    # The parent watchdog loop owns lifecycle cleanup. Keep the maintenance flag
-    # set until it has observed the intentional stop and restarted the server.
+    # Signal completion to the parent loop
+    touch "$UPDATE_COMPLETED_FILE"
+    rm -f "$UPDATE_IN_PROGRESS_FILE"
 }
 
 # --- MONITOR PLAYERS ---
@@ -399,8 +409,11 @@ monitor_players() {
         local current_inode
         current_inode=$(stat -c %i "$LOG" 2>/dev/null || echo "$log_inode")
 
-        if [ "$current_inode" != "$log_inode" ]; then
-            log "Log file recreated (server restarted) — resetting monitor"
+        local TOTAL_LINES NEW_LINES
+        TOTAL_LINES=$(wc -l < "$LOG" 2>/dev/null || echo 0)
+
+        if [ "$current_inode" != "$log_inode" ] || [ "$TOTAL_LINES" -lt "$LAST_READ" ]; then
+            log "Log reset/restart detected — resetting monitor"
             LAST_READ=0
             log_inode=$current_inode
             date +%s > "$LAST_ACTIVITY_FILE"
@@ -408,8 +421,6 @@ monitor_players() {
             echo "0" > "$PLAYER_COUNT_FILE"
         fi
 
-        local TOTAL_LINES NEW_LINES
-        TOTAL_LINES=$(wc -l < "$LOG")
         NEW_LINES=$((TOTAL_LINES - LAST_READ))
 
         if [ "$NEW_LINES" -gt 0 ]; then
@@ -454,7 +465,8 @@ log "=== Starting Dragonwilds Server ==="
 log "Config: AUTO_UPDATE=$ENABLE_AUTO_UPDATE, UPDATE_TIME=${UPDATE_TIME}s, BACKUP_AFTER_UPDATE=$BACKUP_AFTER_UPDATE, BACKUP_DAILY=$BACKUP_DAILY, BACKUP_TIME=$BACKUP_TIME"
 
 # Remove any stale maintenance flags left by a previously killed container
-rm -f "$UPDATE_IN_PROGRESS_FILE" "$BACKUP_IN_PROGRESS_FILE"
+rm -f "$UPDATE_IN_PROGRESS_FILE" "$BACKUP_IN_PROGRESS_FILE" \
+      "$UPDATE_COMPLETED_FILE" "$BACKUP_COMPLETED_FILE"
 
 # Install server files if not present (first run or missing binary)
 BINARY="$SERVERDIR/RSDragonwilds/Binaries/Linux/RSDragonwildsServer-Linux-Shipping"
@@ -545,7 +557,7 @@ while true; do
         fi
     fi
 
-    if [ -f "$UPDATE_IN_PROGRESS_FILE" ] || [ -f "$BACKUP_IN_PROGRESS_FILE" ]; then
+    if [ -f "$UPDATE_IN_PROGRESS_FILE" ] || [ -f "$BACKUP_IN_PROGRESS_FILE" ] || [ -f "$UPDATE_COMPLETED_FILE" ] || [ -f "$BACKUP_COMPLETED_FILE" ]; then
         log "Server stopped for scheduled maintenance — waiting for completion..."
         MAINTENANCE_WAIT=0
         while [ -f "$UPDATE_IN_PROGRESS_FILE" ] || [ -f "$BACKUP_IN_PROGRESS_FILE" ]; do
@@ -561,7 +573,7 @@ while true; do
         touch "$SERVER_RESTART_FILE"
         start_server
         # Remove files after maintenance is complete
-        rm -f "$UPDATE_IN_PROGRESS_FILE" "$BACKUP_IN_PROGRESS_FILE"
+        rm -f "$UPDATE_IN_PROGRESS_FILE" "$BACKUP_IN_PROGRESS_FILE" "$UPDATE_COMPLETED_FILE" "$BACKUP_COMPLETED_FILE"
     else
         log "Server exited unexpectedly — container stopping"
         send_discord "🛑 Dragonwilds server stopped unexpectedly"
