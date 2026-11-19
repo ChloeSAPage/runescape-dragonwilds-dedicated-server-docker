@@ -459,9 +459,6 @@ monitor_players() {
             # Use the DominionPlayerController log, this way we get the character name not the accounts name used for EOS (Steam / Jagex account)
                 if [[ "$line" == *"LogDominionPlayerControllerBase: PlayerChar entered world"* ]]; then
                     player=$(echo "$line" | grep -oE 'Character Name\[[^]]+\]' | sed 's/Character Name\[//;s/\]//')
-            # Use the DominionPlayerController log, this way we get the character name not the accounts name used for EOS (Steam / Jagex account)
-                if [[ "$line" == *"LogDominionPlayerControllerBase: PlayerChar entered world"* ]]; then
-                    player=$(echo "$line" | grep -oE 'Character Name\[[^]]+\]' | sed 's/Character Name\[//;s/\]//')
                     if [ -n "$player" ]; then
                         grep -qxF "$player" "$PLAYERS_FILE" 2>/dev/null || echo "$player" >> "$PLAYERS_FILE"
                         local count
