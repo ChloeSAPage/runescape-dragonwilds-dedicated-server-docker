@@ -470,6 +470,7 @@ monitor_players() {
                     fi
                 fi
 
+                # Remove the player from the list when they disconnect
                 if [[ "$line" == *"ClientRequestDisconnect"* ]]; then
                     player=$(echo "$line" | grep -oE 'Character Name\[[^]]+\]' | sed 's/Character Name\[//;s/\]//')
                     if [ -n "$player" ]; then
@@ -480,6 +481,20 @@ monitor_players() {
                         date +%s > "$LAST_ACTIVITY_FILE"
                         log "Player disconnected: $player (online: $count)"
                         send_discord "🔴 Player disconnected: $player"
+                    fi
+                fi
+
+                # Remove the player from the list when they are kicked
+                if [[ "$line" == *"Player Removed from session"* ]]; then
+                    player=$(echo "$line" | grep -oE -- '-\[[^]]+\]' | sed 's/-\[//;s/\]//')
+                    if [ -n "$player" ]; then
+                        sed -i "/^${player}$/d" "$PLAYERS_FILE"
+                        local count
+                        count=$(wc -l < "$PLAYERS_FILE")
+                        echo "$count" > "$PLAYER_COUNT_FILE"
+                        date +%s > "$LAST_ACTIVITY_FILE"
+                        log "Player kicked: $player (online: $count)"
+                        send_discord "🔴 Player kicked: $player"
                     fi
                 fi
             done < <(tail -n "$NEW_LINES" "$LOG")
