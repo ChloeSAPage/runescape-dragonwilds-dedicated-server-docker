@@ -31,10 +31,13 @@ LOGFILE="$SERVERDIR/RSDragonwilds/Saved/Logs/entrypoint.log"
 LAST_ACTIVITY_FILE="$SERVERDIR/.last_activity"
 PLAYER_COUNT_FILE="$SERVERDIR/.player_count"
 SERVER_RESTART_FILE="$SERVERDIR/.server_restart"
+SERVER_PID_FILE="$SERVERDIR/.server_pid"
 LAST_BACKUP_DATE_FILE="$SERVERDIR/.last_backup_date"
 LAST_APPLIED_BUILD_FILE="$SERVERDIR/.last_applied_build"
 UPDATE_IN_PROGRESS_FILE="$SERVERDIR/.update_in_progress"
 BACKUP_IN_PROGRESS_FILE="$SERVERDIR/.backup_in_progress"
+UPDATE_COMPLETED_FILE="$SERVERDIR/.update_completed"
+BACKUP_COMPLETED_FILE="$SERVERDIR/.backup_completed"
 SERVER_PORT="${SERVER_PORT:-7777}"
 ENABLE_AUTO_UPDATE="${ENABLE_AUTO_UPDATE:-true}"
 UPDATE_TIME="${UPDATE_TIME:-3600}"              # How often (seconds) to check for updates (e.g. 3600 = every hour)
@@ -62,7 +65,9 @@ mkdir -p "$BACKUPDIR" "$SERVERDIR/steamapps" "$(dirname "$LOGFILE")"
 [ -f "$LOGFILE" ] && rm -f "$LOGFILE"
 
 log() {
-    echo "$1" | tee -a "$LOGFILE"
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] $1" | tee -a "$LOGFILE"
 }
 
 # --- FUNCTION TO SEND DISCORD NOTIFICATION ---
@@ -156,17 +161,28 @@ start_server() {
     cd "$SERVERDIR/RSDragonwilds/Binaries/Linux"
     ./RSDragonwildsServer-Linux-Shipping RSDragonwilds -log -Port="${SERVER_PORT}" &
     SERVER_PID=$!
+    echo "$SERVER_PID" > "$SERVER_PID_FILE"
+    log "SERVER PID: $SERVER_PID"
     send_discord "🚀 Dragonwilds server started"
 }
 
 # --- STOP SERVER ---
 stop_server() {
-    if ps -p "$SERVER_PID" > /dev/null 2>&1; then
+    local pid
+    log "=== Inside stop_server ==="
+    pid=$(cat "$SERVER_PID_FILE" 2>/dev/null || echo "${SERVER_PID:-}")
+    log "SERVER PID AFTER: $pid"
+    if [ -n "$pid" ] && ps -p "$pid" > /dev/null 2>&1; then
         log "=== Stopping server ==="
-        kill "$SERVER_PID"
-        wait "$SERVER_PID" || true
         send_discord "🛑 Dragonwilds server stopped"
+        kill "$pid"
+        for _ in $(seq 1 60); do
+            ps -p "$pid" > /dev/null 2>&1 || break
+            sleep 1
+        done
     fi
+    SERVER_PID=""
+    rm -f "$SERVER_PID_FILE"
 }
 
 # --- CLEAN OLD BACKUPS ---
@@ -266,7 +282,8 @@ run_daily_backup() {
 
     send_discord "✅ Daily backup completed — restarting server."
 
-    # Release the main loop to restart the server
+    # Signal completion to the parent loop
+    touch "$BACKUP_COMPLETED_FILE"
     rm -f "$BACKUP_IN_PROGRESS_FILE"
 }
 
@@ -280,8 +297,8 @@ run_update() {
     LOCAL_BUILD="${LOCAL_BUILD:-unknown}"
     log "Local build: $LOCAL_BUILD"
 
-    REMOTE_BUILD=$(/home/ubuntu/steamcmd/steamcmd.sh +login anonymous +app_info_print $APPID +quit \
-        | grep '"buildid"' | head -n1 | sed 's/.*"\([0-9]*\)".*/\1/')
+    REMOTE_BUILD=$(/home/ubuntu/steamcmd/steamcmd.sh +login anonymous +app_info_update 1 +app_info_print $APPID +quit \
+    | grep '"buildid"' | head -n1 | sed 's/.*"\([0-9]*\)".*/\1/')
     log "Remote build: $REMOTE_BUILD"
 
     if [ -z "$REMOTE_BUILD" ]; then
@@ -297,7 +314,7 @@ run_update() {
     fi
 
     if [ "$REMOTE_BUILD" = "$LAST_APPLIED_BUILD" ] && [ "$LOCAL_BUILD" = "$LAST_APPLIED_BUILD" ]; then
-        log "Update to build $REMOTE_BUILD was already applied — skipping"
+        log "Update to build $REMOTE_BUILD was already applied (manifest/local build shows $LOCAL_BUILD) — skipping"
         return
     fi
 
@@ -325,14 +342,22 @@ run_update() {
         sleep 5
     done
 
+    NEW_LOCAL=$(grep '"buildid"' "$SERVERDIR/steamapps/appmanifest_$APPID.acf" 2>/dev/null | head -n1 | sed 's/.*"\([0-9]*\)".*/\1/')
+    log "Build after update: $NEW_LOCAL (expected $REMOTE_BUILD)"
+    if [ "$UPDATE_SUCCEEDED" = "true" ] && [ "$NEW_LOCAL" != "$REMOTE_BUILD" ]; then
+        log "WARNING: SteamCMD reported success but manifest build doesn't match remote"
+    fi
+
     log "=== Restoring config ==="
     [ -f "$BACKUPDIR/DedicatedServer.ini" ] && cp "$BACKUPDIR/DedicatedServer.ini" "$CONFIGFILE"
 
-    if [ "$UPDATE_SUCCEEDED" = "true" ]; then
+    if [ "$UPDATE_SUCCEEDED" = "true" ] && [ "$NEW_LOCAL" = "$REMOTE_BUILD" ]; then
         echo "$REMOTE_BUILD" > "$LAST_APPLIED_BUILD_FILE"
         log "Recorded applied build: $REMOTE_BUILD"
+    elif [ "$UPDATE_SUCCEEDED" = "true" ]; then
+        log "WARNING: SteamCMD reported success but manifest shows $NEW_LOCAL, not $REMOTE_BUILD — will retry at next check"
     else
-        log "WARNING: SteamCMD failed after 5 attempts — update may be incomplete"
+        log "WARNING: SteamCMD failed after 5 attempts — update may be incomplete, will retry at next check"
     fi
 
     if [ "$BACKUP_AFTER_UPDATE" = "true" ]; then
@@ -345,8 +370,34 @@ run_update() {
 
     send_discord "✅ Dragonwilds server updated to build $REMOTE_BUILD — restarting server."
 
-    # Release the main loop to restart the server
+    # Signal completion to the parent loop
+    touch "$UPDATE_COMPLETED_FILE"
     rm -f "$UPDATE_IN_PROGRESS_FILE"
+}
+
+# --- RUN UPDATE ON BOOT ---
+run_update_on_boot() {
+    log "=== Boot-time update check ==="
+    LOCAL_BUILD=$(grep '"buildid"' "$SERVERDIR/steamapps/appmanifest_$APPID.acf" 2>/dev/null | head -n1 | sed 's/.*"\([0-9]*\)".*/\1/')
+    LOCAL_BUILD="${LOCAL_BUILD:-unknown}"
+    REMOTE_BUILD=$(/home/ubuntu/steamcmd/steamcmd.sh +login anonymous +app_info_update 1 +app_info_print $APPID +quit \
+        | grep '"buildid"' | head -n1 | sed 's/.*"\([0-9]*\)".*/\1/')
+    log "Boot check: local=$LOCAL_BUILD remote=$REMOTE_BUILD"
+
+    if [ -n "$REMOTE_BUILD" ] && [ "$LOCAL_BUILD" != "$REMOTE_BUILD" ]; then
+        log "Updating before first start"
+        [ -f "$CONFIGFILE" ] && cp "$CONFIGFILE" "$BACKUPDIR/DedicatedServer.ini"
+        for i in {1..5}; do
+            /home/ubuntu/steamcmd/steamcmd.sh \
+                +force_install_dir "$SERVERDIR" \
+                +login anonymous \
+                +app_update $APPID validate \
+                +quit && break
+            log "SteamCMD failed, retrying in 5 seconds..."
+            sleep 5
+        done
+        [ -f "$BACKUPDIR/DedicatedServer.ini" ] && cp "$BACKUPDIR/DedicatedServer.ini" "$CONFIGFILE"
+    fi
 }
 
 # --- MONITOR PLAYERS ---
@@ -388,8 +439,11 @@ monitor_players() {
         local current_inode
         current_inode=$(stat -c %i "$LOG" 2>/dev/null || echo "$log_inode")
 
-        if [ "$current_inode" != "$log_inode" ]; then
-            log "Log file recreated (server restarted) — resetting monitor"
+        local TOTAL_LINES NEW_LINES
+        TOTAL_LINES=$(wc -l < "$LOG" 2>/dev/null || echo 0)
+
+        if [ "$current_inode" != "$log_inode" ] || [ "$TOTAL_LINES" -lt "$LAST_READ" ]; then
+            log "Log reset/restart detected — resetting monitor"
             LAST_READ=0
             log_inode=$current_inode
             date +%s > "$LAST_ACTIVITY_FILE"
@@ -397,13 +451,14 @@ monitor_players() {
             echo "0" > "$PLAYER_COUNT_FILE"
         fi
 
-        local TOTAL_LINES NEW_LINES
-        TOTAL_LINES=$(wc -l < "$LOG")
         NEW_LINES=$((TOTAL_LINES - LAST_READ))
 
         if [ "$NEW_LINES" -gt 0 ]; then
             local line player
             while IFS= read -r line; do
+            # Use the DominionPlayerController log, this way we get the character name not the accounts name used for EOS (Steam / Jagex account)
+                if [[ "$line" == *"LogDominionPlayerControllerBase: PlayerChar entered world"* ]]; then
+                    player=$(echo "$line" | grep -oE 'Character Name\[[^]]+\]' | sed 's/Character Name\[//;s/\]//')
             # Use the DominionPlayerController log, this way we get the character name not the accounts name used for EOS (Steam / Jagex account)
                 if [[ "$line" == *"LogDominionPlayerControllerBase: PlayerChar entered world"* ]]; then
                     player=$(echo "$line" | grep -oE 'Character Name\[[^]]+\]' | sed 's/Character Name\[//;s/\]//')
@@ -418,7 +473,7 @@ monitor_players() {
                     fi
                 fi
 
-                if [[ "$line" == *"LogDominionPlayerController: ClientRequestDisconnect"* ]]; then
+                if [[ "$line" == *"ClientRequestDisconnect"* ]]; then
                     player=$(echo "$line" | grep -oE 'Character Name\[[^]]+\]' | sed 's/Character Name\[//;s/\]//')
                     if [ -n "$player" ]; then
                         sed -i "/^${player}$/d" "$PLAYERS_FILE"
@@ -443,7 +498,8 @@ log "=== Starting Dragonwilds Server ==="
 log "Config: AUTO_UPDATE=$ENABLE_AUTO_UPDATE, UPDATE_TIME=${UPDATE_TIME}s, BACKUP_AFTER_UPDATE=$BACKUP_AFTER_UPDATE, BACKUP_DAILY=$BACKUP_DAILY, BACKUP_TIME=$BACKUP_TIME"
 
 # Remove any stale maintenance flags left by a previously killed container
-rm -f "$UPDATE_IN_PROGRESS_FILE" "$BACKUP_IN_PROGRESS_FILE"
+rm -f "$UPDATE_IN_PROGRESS_FILE" "$BACKUP_IN_PROGRESS_FILE" \
+      "$UPDATE_COMPLETED_FILE" "$BACKUP_COMPLETED_FILE"
 
 # Install server files if not present (first run or missing binary)
 BINARY="$SERVERDIR/RSDragonwilds/Binaries/Linux/RSDragonwildsServer-Linux-Shipping"
@@ -453,6 +509,7 @@ if [ ! -f "$BINARY" ]; then
 fi
 
 prepare_dedicated_server_ini
+run_update_on_boot
 start_server
 monitor_players
 
@@ -523,9 +580,18 @@ fi
 # restart the server — rather than letting the container exit and getting
 # SIGKILL'd mid-steamcmd by the kernel (PID 1 death kills the whole namespace).
 while true; do
-    wait "$SERVER_PID" || true
+    current_pid=$(cat "$SERVER_PID_FILE" 2>/dev/null || echo "${SERVER_PID:-}")
+    if [ -n "$current_pid" ]; then
+        if ps -p "$current_pid" > /dev/null 2>&1; then
+            wait "$current_pid" || true
+        else
+            log "Stale PID file entry: $current_pid — clearing it"
+            rm -f "$SERVER_PID_FILE"
+            SERVER_PID=""
+        fi
+    fi
 
-    if [ -f "$UPDATE_IN_PROGRESS_FILE" ] || [ -f "$BACKUP_IN_PROGRESS_FILE" ]; then
+    if [ -f "$UPDATE_IN_PROGRESS_FILE" ] || [ -f "$BACKUP_IN_PROGRESS_FILE" ] || [ -f "$UPDATE_COMPLETED_FILE" ] || [ -f "$BACKUP_COMPLETED_FILE" ]; then
         log "Server stopped for scheduled maintenance — waiting for completion..."
         MAINTENANCE_WAIT=0
         while [ -f "$UPDATE_IN_PROGRESS_FILE" ] || [ -f "$BACKUP_IN_PROGRESS_FILE" ]; do
@@ -540,9 +606,11 @@ while true; do
         log "Maintenance complete — restarting server"
         touch "$SERVER_RESTART_FILE"
         start_server
-        # monitor_players inode watch handles the new log automatically
+        # Remove files after maintenance is complete
+        rm -f "$UPDATE_IN_PROGRESS_FILE" "$BACKUP_IN_PROGRESS_FILE" "$UPDATE_COMPLETED_FILE" "$BACKUP_COMPLETED_FILE"
     else
         log "Server exited unexpectedly — container stopping"
+        send_discord "💥 Dragonwilds server stopped unexpectedly"
         break
     fi
 done
